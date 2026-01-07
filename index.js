@@ -28,7 +28,7 @@ app.use(cors());
 // -----------------------------
 // PLACEHOLDER: Replace this URL with your Render PostgreSQL URL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://jimas_db_user:EPfkjEPaTASFUJRZJOfGXH2bYGgY3E0k@dpg-d5f2t7chg0os73ft39b0-a.frankfurt-postgres.render.com/jimas_db",
+  connectionString: process.env.DATABASE_URL || "postgresql://jimas_db_ldts_user:mngwWQoTAZtzVqQax0jJHtfSUscUSGkm@dpg-d5fc1qn5r7bs73ansc5g-a.frankfurt-postgres.render.com/jimas_db_ldts",
   ssl: { rejectUnauthorized: false }
 });
 
