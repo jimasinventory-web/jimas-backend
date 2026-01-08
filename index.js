@@ -1,6 +1,6 @@
 // =============================================================================
 // JIMAS COMPUTERS NIGERIA LIMITED - INVENTORY & POS SYSTEM
-// Complete Backend API
+// Complete Backend API - UPDATED WITH NEW FEATURES
 // =============================================================================
 
 // -----------------------------
@@ -26,7 +26,6 @@ app.use(cors());
 // -----------------------------
 // DATABASE CONNECTION
 // -----------------------------
-// PLACEHOLDER: Replace this URL with your Render PostgreSQL URL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || "postgresql://jimas_db_ldts_user:mngwWQoTAZtzVqQax0jJHtfSUscUSGkm@dpg-d5fc1qn5r7bs73ansc5g-a.frankfurt-postgres.render.com/jimas_db_ldts",
   ssl: { rejectUnauthorized: false }
@@ -99,13 +98,13 @@ async function getSupplierById(id) {
 }
 
 // =============================================================================
-// RECEIPT GENERATOR HELPERS
+// RECEIPT GENERATOR HELPERS - UPDATED WITH SPECIFICATIONS
 // =============================================================================
 
-// Cash Sale Receipt
+// Cash Sale Receipt - NOW INCLUDES SPECIFICATIONS
 function generateCashSaleReceipt(saleData, res) {
   const doc = new PDFDocument({
-    size: [226.77, 600],
+    size: [226.77, 700],
     margins: { top: 10, bottom: 10, left: 10, right: 10 }
   });
 
@@ -148,9 +147,15 @@ function generateCashSaleReceipt(saleData, res) {
     const itemTotal = parseFloat(item.price) + parseFloat(item.ram_upgrade_price || 0) + parseFloat(item.storage_upgrade_price || 0);
     subtotal += itemTotal;
 
-    doc.fontSize(7).font("Helvetica").text(`${index + 1}. ${item.product_name}`, { align: "left" });
-    doc.text(`   S/N: ${item.serial_number}`, { align: "left" });
-    doc.text(`   Price: NGN ${parseFloat(item.price).toLocaleString()}`, { align: "left" });
+    doc.fontSize(7).font("Helvetica-Bold").text(`${index + 1}. ${item.product_name}`, { align: "left" });
+    doc.fontSize(6).font("Helvetica").text(`   S/N: ${item.serial_number}`, { align: "left" });
+    
+    // ADD SPECIFICATIONS TO RECEIPT
+    if (item.specifications) {
+      doc.fontSize(6).font("Helvetica").text(`   Specs: ${item.specifications}`, { align: "left" });
+    }
+    
+    doc.fontSize(7).font("Helvetica").text(`   Price: NGN ${parseFloat(item.price).toLocaleString()}`, { align: "left" });
 
     if (item.ram_upgrade_price && parseFloat(item.ram_upgrade_price) > 0) {
       doc.text(`   RAM Upgrade: NGN ${parseFloat(item.ram_upgrade_price).toLocaleString()}`, { align: "left" });
@@ -162,6 +167,14 @@ function generateCashSaleReceipt(saleData, res) {
   });
 
   doc.fontSize(8).text("----------------------------------------", { align: "center" });
+
+  // Sales Note (if exists)
+  if (saleData.sales_note) {
+    doc.fontSize(7).font("Helvetica-Bold").text("NOTE:", { align: "left" });
+    doc.fontSize(7).font("Helvetica").text(saleData.sales_note, { align: "left" });
+    doc.moveDown(0.3);
+    doc.fontSize(8).text("----------------------------------------", { align: "center" });
+  }
 
   // Totals
   doc.fontSize(8).font("Helvetica").text(`Subtotal: NGN ${subtotal.toLocaleString()}`, { align: "right" });
@@ -181,10 +194,10 @@ function generateCashSaleReceipt(saleData, res) {
   doc.end();
 }
 
-// Credit Payment Receipt
+// Credit Payment Receipt - NOW INCLUDES SPECIFICATIONS
 function generateCreditPaymentReceipt(paymentData, res) {
   const doc = new PDFDocument({
-    size: [226.77, 500],
+    size: [226.77, 600],
     margins: { top: 10, bottom: 10, left: 10, right: 10 }
   });
 
@@ -209,6 +222,7 @@ function generateCreditPaymentReceipt(paymentData, res) {
   // Payment Details
   doc.fontSize(8).font("Helvetica").text(`Date: ${new Date(paymentData.payment_date).toLocaleString()}`, { align: "left" });
   doc.text(`Receipt No: CP-${paymentData.payment_id}`, { align: "left" });
+  doc.text(`Sale ID: #${paymentData.sale_id}`, { align: "left" });
   doc.moveDown(0.3);
 
   // Customer Info
@@ -217,6 +231,23 @@ function generateCreditPaymentReceipt(paymentData, res) {
   doc.text(`Phone: ${paymentData.customer_phone}`, { align: "left" });
   doc.moveDown(0.3);
   doc.fontSize(8).text("----------------------------------------", { align: "center" });
+
+  // Items with Specifications
+  if (paymentData.items && paymentData.items.length > 0) {
+    doc.fontSize(8).font("Helvetica-Bold").text("ITEMS:", { align: "left" });
+    doc.moveDown(0.2);
+    
+    paymentData.items.forEach((item, index) => {
+      doc.fontSize(7).font("Helvetica-Bold").text(`${index + 1}. ${item.product_name}`, { align: "left" });
+      doc.fontSize(6).font("Helvetica").text(`   S/N: ${item.serial_number}`, { align: "left" });
+      if (item.specifications) {
+        doc.fontSize(6).font("Helvetica").text(`   Specs: ${item.specifications}`, { align: "left" });
+      }
+      doc.moveDown(0.1);
+    });
+    
+    doc.fontSize(8).text("----------------------------------------", { align: "center" });
+  }
 
   // Payment Info
   doc.fontSize(9).font("Helvetica-Bold").text(`Amount Paid: NGN ${parseFloat(paymentData.amount_paid).toLocaleString()}`, { align: "left" });
@@ -431,8 +462,8 @@ app.get("/branches", authenticate, async (req, res) => {
 // SUPPLIER ROUTES
 // =============================================================================
 
-// Create Supplier
-app.post("/supplier", authenticate, async (req, res) => {
+// Create Supplier (Admin Only - UPDATED)
+app.post("/supplier", authenticate, authorizeAdmin, async (req, res) => {
   const err = validateRequiredFields(["name", "contact_info"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -464,11 +495,11 @@ app.get("/suppliers", authenticate, async (req, res) => {
 });
 
 // =============================================================================
-// STOCK ROUTES
+// STOCK ROUTES - UPDATED: ADD/DELETE NOW ADMIN ONLY
 // =============================================================================
 
-// Add Single Stock Item
-app.post("/stock", authenticate, async (req, res) => {
+// Add Single Stock Item (ADMIN ONLY - UPDATED)
+app.post("/stock", authenticate, authorizeAdmin, async (req, res) => {
   const err = validateRequiredFields(["product_name", "serial_number", "branch_name", "supplier_name", "cost_price"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -480,11 +511,6 @@ app.post("/stock", authenticate, async (req, res) => {
 
     const supplier = await getSupplierByName(supplier_name);
     if (!supplier) return res.status(400).json({ error: "Supplier not found" });
-
-    // Sales users can only add to their branch
-    if (req.user.role === "sales" && req.user.branch_id !== branch.id) {
-      return res.status(403).json({ error: "You can only add stock to your assigned branch" });
-    }
 
     // Check if serial already exists
     const serialCheck = await pool.query("SELECT id FROM serial_numbers WHERE serial_number = $1", [serial_number]);
@@ -505,8 +531,8 @@ app.post("/stock", authenticate, async (req, res) => {
   }
 });
 
-// Add Stock in Bulk (Multiple Serial Numbers at Once)
-app.post("/stock/bulk", authenticate, async (req, res) => {
+// Add Stock in Bulk (ADMIN ONLY - UPDATED)
+app.post("/stock/bulk", authenticate, authorizeAdmin, async (req, res) => {
   const err = validateRequiredFields(["product_name", "branch_name", "supplier_name", "cost_price", "serial_numbers"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -523,11 +549,6 @@ app.post("/stock/bulk", authenticate, async (req, res) => {
 
     const supplier = await getSupplierByName(supplier_name);
     if (!supplier) return res.status(400).json({ error: "Supplier not found" });
-
-    // Sales users can only add to their branch
-    if (req.user.role === "sales" && req.user.branch_id !== branch.id) {
-      return res.status(403).json({ error: "You can only add stock to your assigned branch" });
-    }
 
     const client = await pool.connect();
     try {
@@ -575,10 +596,10 @@ app.post("/stock/bulk", authenticate, async (req, res) => {
   }
 });
 
-// Return to Supplier (Delete Stock)
-app.delete("/stock/:serial_number", authenticate, async (req, res) => {
+// Return to Supplier / Delete Stock (ADMIN ONLY - UPDATED)
+app.delete("/stock/:serial_number", authenticate, authorizeAdmin, async (req, res) => {
   const { serial_number } = req.params;
-  const { reason } = req.body; // Optional reason for return
+  const { reason } = req.body;
 
   try {
     const laptop = await pool.query(
@@ -591,11 +612,6 @@ app.delete("/stock/:serial_number", authenticate, async (req, res) => {
     }
 
     const laptopData = laptop.rows[0];
-
-    // Sales users can only delete from their branch
-    if (req.user.role === "sales" && req.user.branch_id !== laptopData.branch_id) {
-      return res.status(403).json({ error: "You can only return stock from your assigned branch" });
-    }
 
     // Cannot delete sold laptops
     if (laptopData.status === "sold") {
@@ -760,16 +776,16 @@ app.get("/stock/groups/:product_name", authenticate, async (req, res) => {
   }
 });
 // =============================================================================
-// SALES ROUTES
+// SALES ROUTES - UPDATED WITH SALES_NOTE
 // =============================================================================
 
-// Create Sale (Cash or Credit)
+// Create Sale (Cash or Credit) - UPDATED WITH SALES_NOTE
 app.post("/sales", authenticate, async (req, res) => {
   const required = ["sold_by_email", "branch_name", "payment_type", "customer_name", "customer_phone", "items"];
   const err = validateRequiredFields(required, req.body);
   if (err) return res.status(400).json({ error: err });
 
-  const { sold_by_email, branch_name, payment_type, customer_name, customer_phone, items, vat_enabled, vat_percentage } = req.body;
+  const { sold_by_email, branch_name, payment_type, customer_name, customer_phone, items, vat_enabled, vat_percentage, sales_note } = req.body;
 
   // Validate items
   if (!Array.isArray(items) || items.length === 0) {
@@ -835,6 +851,7 @@ app.post("/sales", authenticate, async (req, res) => {
 
         const laptop = laptopResult.rows[0];
 
+        // UPDATED: Allow both 'available' and 'returned' status laptops to be sold
         if (!["available", "returned"].includes(laptop.status)) {
           throw new Error(`Serial ${serial_number} is ${laptop.status} and cannot be sold`);
         }
@@ -851,6 +868,7 @@ app.post("/sales", authenticate, async (req, res) => {
           laptop_id: laptop.id,
           product_name: laptop.product_name,
           serial_number: laptop.serial_number,
+          specifications: laptop.specifications,
           price: laptopPrice,
           ram_upgrade: ramUpgrade,
           storage_upgrade: storageUpgrade,
@@ -866,15 +884,15 @@ app.post("/sales", authenticate, async (req, res) => {
       }
 
       const totalAmount = subtotal + vatAmount;
-      const totalProfit = subtotal - totalCost; // Profit before VAT
+      const totalProfit = subtotal - totalCost;
 
-      // Create sale record
+      // Create sale record - UPDATED WITH SALES_NOTE
       const saleResult = await client.query(
         `INSERT INTO sales 
          (branch_id, sold_by_email, payment_type, customer_name, customer_phone, 
           subtotal, vat_enabled, vat_percentage, vat_amount, total_amount, 
-          total_cost, total_profit, unsettled_balance, is_credit, credit_customer_id, is_voided)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, false)
+          total_cost, total_profit, unsettled_balance, is_credit, credit_customer_id, is_voided, sales_note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, false, $16)
          RETURNING id, created_at`,
         [
           branch.id,
@@ -891,7 +909,8 @@ app.post("/sales", authenticate, async (req, res) => {
           totalProfit,
           payment_type.toLowerCase() === "credit" ? totalAmount : 0,
           payment_type.toLowerCase() === "credit",
-          creditCustomerId
+          creditCustomerId,
+          sales_note || null
         ]
       );
 
@@ -1003,7 +1022,7 @@ app.get("/sales/:sale_id", authenticate, async (req, res) => {
   }
 });
 
-// Cash Sale Receipt (Only for cash sales)
+// Cash Sale Receipt - UPDATED WITH SPECIFICATIONS AND SALES_NOTE
 app.get("/receipt/sale/:sale_id", async (req, res) => {
   try {
     const { sale_id } = req.params;
@@ -1027,8 +1046,9 @@ app.get("/receipt/sale/:sale_id", async (req, res) => {
       return res.status(400).json({ error: "Receipts are only generated for cash sales" });
     }
 
+    // UPDATED: Include specifications in items
     const items = await pool.query(
-      `SELECT si.*, sn.product_name, sn.serial_number
+      `SELECT si.*, sn.product_name, sn.serial_number, sn.specifications
        FROM sale_items si
        JOIN serial_numbers sn ON sn.id = si.serial_number_id
        WHERE si.sale_id = $1`,
@@ -1045,7 +1065,8 @@ app.get("/receipt/sale/:sale_id", async (req, res) => {
       vat_enabled: saleData.vat_enabled,
       vat_percentage: saleData.vat_percentage,
       vat_amount: saleData.vat_amount,
-      total_amount: saleData.total_amount
+      total_amount: saleData.total_amount,
+      sales_note: saleData.sales_note
     };
 
     generateCashSaleReceipt(receiptData, res);
@@ -1110,7 +1131,7 @@ app.post("/cash-return", authenticate, async (req, res) => {
       [itemTotal, costPrice, profitToReverse, sale_id]
     );
 
-    // Mark laptop as returned
+    // Mark laptop as returned (can be sold again)
     await client.query(
       "UPDATE serial_numbers SET status = 'returned', sale_price = NULL WHERE id = $1",
       [saleItem.laptop_id]
@@ -1200,7 +1221,7 @@ app.post("/credit-return", authenticate, async (req, res) => {
       );
     }
 
-    // Mark laptop as returned
+    // Mark laptop as returned (can be sold again)
     await client.query(
       "UPDATE serial_numbers SET status = 'returned', sale_price = NULL WHERE id = $1",
       [saleItem.laptop_id]
@@ -1220,7 +1241,6 @@ app.post("/credit-return", authenticate, async (req, res) => {
     client.release();
   }
 });
-
 // =============================================================================
 // CREDIT CUSTOMER ROUTES
 // =============================================================================
@@ -1240,7 +1260,7 @@ app.get("/credit-customers", authenticate, async (req, res) => {
   }
 });
 
-// Get Credit Customer Debts
+// Get Credit Customer Debts - UPDATED WITH SPECIFICATIONS
 app.get("/credit-customers/:contact_info/debts", authenticate, async (req, res) => {
   try {
     const phone = req.params.contact_info;
@@ -1256,11 +1276,13 @@ app.get("/credit-customers/:contact_info/debts", authenticate, async (req, res) 
 
     const customerId = customer.rows[0].id;
 
+    // UPDATED: Include specifications in items
     const debts = await pool.query(
-      `SELECT s.id AS sale_id, s.total_amount, s.unsettled_balance, s.created_at,
+      `SELECT s.id AS sale_id, s.total_amount, s.unsettled_balance, s.created_at, s.sales_note,
               array_agg(json_build_object(
                 'product_name', sn.product_name,
                 'serial_number', sn.serial_number,
+                'specifications', sn.specifications,
                 'price', si.price
               )) AS items
        FROM sales s
@@ -1282,7 +1304,7 @@ app.get("/credit-customers/:contact_info/debts", authenticate, async (req, res) 
   }
 });
 
-// Credit Payment (for regular credit customers - per sale)
+// Credit Payment - UPDATED TO INCLUDE SPECS IN RECEIPT
 app.post("/credit-payment", authenticate, async (req, res) => {
   const err = validateRequiredFields(["customer_phone", "amount", "sale_id"], req.body);
   if (err) return res.status(400).json({ error: err });
@@ -1366,7 +1388,7 @@ app.post("/credit-payment", authenticate, async (req, res) => {
   }
 });
 
-// Credit Payment Receipt
+// Credit Payment Receipt - UPDATED WITH SPECIFICATIONS
 app.get("/receipt/credit-payment/:payment_id", async (req, res) => {
   try {
     const { payment_id } = req.params;
@@ -1385,14 +1407,25 @@ app.get("/receipt/credit-payment/:payment_id", async (req, res) => {
 
     const p = payment.rows[0];
 
+    // Get items with specifications for this sale
+    const items = await pool.query(
+      `SELECT sn.product_name, sn.serial_number, sn.specifications, si.price
+       FROM sale_items si
+       JOIN serial_numbers sn ON sn.id = si.serial_number_id
+       WHERE si.sale_id = $1`,
+      [p.sale_id]
+    );
+
     const paymentData = {
       payment_id: p.id,
       payment_date: p.created_at,
+      sale_id: p.sale_id,
       customer_name: p.customer_name,
       customer_phone: p.customer_phone,
       amount_paid: p.amount,
       previous_balance: parseFloat(p.open_balance) + parseFloat(p.amount),
-      new_balance: p.open_balance
+      new_balance: p.open_balance,
+      items: items.rows
     };
 
     generateCreditPaymentReceipt(paymentData, res);
@@ -1401,11 +1434,12 @@ app.get("/receipt/credit-payment/:payment_id", async (req, res) => {
     res.status(500).json({ error: "Failed to generate receipt" });
   }
 });
+
 // =============================================================================
-// BULK RESELLER ROUTES (Credit Book System)
+// BULK RESELLER ROUTES - UPDATED WITH DELETE AND RETURN FEATURES
 // =============================================================================
 
-// Create Bulk Reseller
+// Create Bulk Reseller (ADMIN ONLY - UPDATED)
 app.post("/bulk-resellers", authenticate, authorizeAdmin, async (req, res) => {
   const err = validateRequiredFields(["name", "contact_info"], req.body);
   if (err) return res.status(400).json({ error: err });
@@ -1457,7 +1491,63 @@ app.get("/bulk-resellers", authenticate, async (req, res) => {
   }
 });
 
-// Add Laptops to Bulk Reseller Credit Book
+// DELETE BULK RESELLER (ADMIN ONLY - NEW FEATURE)
+app.delete("/bulk-resellers/:reseller_id", authenticate, authorizeAdmin, async (req, res) => {
+  const { reseller_id } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Check if reseller exists
+    const reseller = await client.query(
+      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      [reseller_id]
+    );
+
+    if (!reseller.rows.length) {
+      throw new Error("Bulk reseller not found");
+    }
+
+    const resellerData = reseller.rows[0];
+
+    // Check if reseller has outstanding balance
+    if (parseFloat(resellerData.open_balance) > 0) {
+      throw new Error(`Cannot delete reseller with outstanding balance of ₦${parseFloat(resellerData.open_balance).toLocaleString()}. Clear balance first.`);
+    }
+
+    // Check if reseller has items in credit book
+    const itemsCheck = await client.query(
+      "SELECT COUNT(*) AS count FROM bulk_reseller_items WHERE reseller_id = $1",
+      [reseller_id]
+    );
+
+    if (parseInt(itemsCheck.rows[0].count) > 0) {
+      throw new Error("Cannot delete reseller with items in credit book. Return all items first.");
+    }
+
+    // Delete payments history
+    await client.query("DELETE FROM bulk_reseller_payments WHERE reseller_id = $1", [reseller_id]);
+
+    // Delete the reseller
+    await client.query("DELETE FROM credit_customers WHERE id = $1", [reseller_id]);
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Bulk reseller deleted successfully",
+      reseller_name: resellerData.name
+    });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Delete bulk reseller error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Add Laptops to Bulk Reseller Credit Book (Sales can do this - UPDATED)
 app.post("/bulk-resellers/:reseller_id/add-laptops", authenticate, async (req, res) => {
   const err = validateRequiredFields(["branch_name", "items"], req.body);
   if (err) return res.status(400).json({ error: err });
@@ -1485,6 +1575,11 @@ app.post("/bulk-resellers/:reseller_id/add-laptops", authenticate, async (req, r
 
     const branch = await getBranchByName(branch_name);
     if (!branch) throw new Error("Branch not found");
+
+    // Sales users can only add from their branch
+    if (req.user.role === "sales" && req.user.branch_id !== branch.id) {
+      throw new Error("You can only add laptops from your assigned branch");
+    }
 
     let totalAmount = 0;
     const addedItems = [];
@@ -1557,6 +1652,80 @@ app.post("/bulk-resellers/:reseller_id/add-laptops", authenticate, async (req, r
   }
 });
 
+// RETURN LAPTOP FROM BULK RESELLER (NEW FEATURE)
+app.post("/bulk-resellers/:reseller_id/return-laptop", authenticate, async (req, res) => {
+  const err = validateRequiredFields(["serial_number"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { reseller_id } = req.params;
+  const { serial_number } = req.body;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Verify reseller exists
+    const reseller = await client.query(
+      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      [reseller_id]
+    );
+
+    if (!reseller.rows.length) {
+      throw new Error("Bulk reseller not found");
+    }
+
+    // Find the item in credit book
+    const itemResult = await client.query(
+      `SELECT bri.*, sn.serial_number, sn.product_name, sn.id AS laptop_id
+       FROM bulk_reseller_items bri
+       JOIN serial_numbers sn ON sn.id = bri.serial_number_id
+       WHERE bri.reseller_id = $1 AND sn.serial_number = $2`,
+      [reseller_id, serial_number]
+    );
+
+    if (!itemResult.rows.length) {
+      throw new Error("Laptop not found in this reseller's credit book");
+    }
+
+    const item = itemResult.rows[0];
+    const givenPrice = parseFloat(item.given_price);
+
+    // Remove from credit book
+    await client.query("DELETE FROM bulk_reseller_items WHERE id = $1", [item.id]);
+
+    // Mark laptop as returned (available for sale again)
+    await client.query(
+      "UPDATE serial_numbers SET status = 'returned', sale_price = NULL WHERE id = $1",
+      [item.laptop_id]
+    );
+
+    // Update reseller balance (reduce what they owe)
+    const newBalance = Math.max(0, parseFloat(reseller.rows[0].open_balance) - givenPrice);
+    const newTotalPurchases = Math.max(0, parseFloat(reseller.rows[0].total_purchases) - givenPrice);
+    
+    await client.query(
+      "UPDATE credit_customers SET open_balance = $1, total_purchases = $2 WHERE id = $3",
+      [newBalance, newTotalPurchases, reseller_id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Laptop returned successfully",
+      serial_number: serial_number,
+      product_name: item.product_name,
+      amount_reduced: givenPrice,
+      new_balance: newBalance
+    });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Return laptop from bulk reseller error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
 // Get Bulk Reseller Credit Book
 app.get("/bulk-resellers/:reseller_id/credit-book", authenticate, async (req, res) => {
   try {
@@ -1592,7 +1761,7 @@ app.get("/bulk-resellers/:reseller_id/credit-book", authenticate, async (req, re
   }
 });
 
-// Bulk Reseller Payment (Simple payment that reduces total owed)
+// Bulk Reseller Payment
 app.post("/bulk-resellers/:reseller_id/payment", authenticate, async (req, res) => {
   const err = validateRequiredFields(["amount"], req.body);
   if (err) return res.status(400).json({ error: err });
@@ -1693,7 +1862,6 @@ app.get("/receipt/bulk-reseller-payment/:payment_id", async (req, res) => {
     res.status(500).json({ error: "Failed to generate receipt" });
   }
 });
-
 // =============================================================================
 // SUPPLIER FAULT REPORT ROUTES
 // =============================================================================
@@ -1711,7 +1879,6 @@ app.post("/supplier-reports", authenticate, async (req, res) => {
       return res.status(400).json({ error: "Supplier not found" });
     }
 
-    // faults should be an array like: [{fault_type: "bad_keyboard", count: 2}, {fault_type: "bad_screen", count: 3}]
     if (!Array.isArray(faults)) {
       return res.status(400).json({ error: "Faults must be an array" });
     }
@@ -1818,9 +1985,9 @@ app.get("/reports/daily", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone,
+      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone, s.sales_note,
               DATE(s.created_at) AS sale_date, s.created_at,
-              sn.product_name, sn.serial_number, sn.cost_price,
+              sn.product_name, sn.serial_number, sn.specifications, sn.cost_price,
               si.price AS sale_price, s.sold_by_email, b.name AS branch_name,
               (si.price - sn.cost_price) AS profit
        FROM sales s
@@ -1868,9 +2035,9 @@ app.get("/reports/weekly", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone,
+      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone, s.sales_note,
               DATE(s.created_at) AS sale_date, s.created_at,
-              sn.product_name, sn.serial_number, sn.cost_price,
+              sn.product_name, sn.serial_number, sn.specifications, sn.cost_price,
               si.price AS sale_price, s.sold_by_email, b.name AS branch_name,
               (si.price - sn.cost_price) AS profit
        FROM sales s
@@ -1921,9 +2088,9 @@ app.get("/reports/monthly", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone,
+      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone, s.sales_note,
               DATE(s.created_at) AS sale_date, s.created_at,
-              sn.product_name, sn.serial_number, sn.cost_price,
+              sn.product_name, sn.serial_number, sn.specifications, sn.cost_price,
               si.price AS sale_price, s.sold_by_email, b.name AS branch_name,
               (si.price - sn.cost_price) AS profit
        FROM sales s
@@ -1976,9 +2143,9 @@ app.get("/reports/yearly", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone,
+      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone, s.sales_note,
               DATE(s.created_at) AS sale_date, s.created_at,
-              sn.product_name, sn.serial_number, sn.cost_price,
+              sn.product_name, sn.serial_number, sn.specifications, sn.cost_price,
               si.price AS sale_price, s.sold_by_email, b.name AS branch_name,
               (si.price - sn.cost_price) AS profit
        FROM sales s
@@ -2029,9 +2196,9 @@ app.get("/reports/custom", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone,
+      `SELECT s.id AS sale_id, s.payment_type, s.customer_name, s.customer_phone, s.sales_note,
               DATE(s.created_at) AS sale_date, s.created_at,
-              sn.product_name, sn.serial_number, sn.cost_price,
+              sn.product_name, sn.serial_number, sn.specifications, sn.cost_price,
               si.price AS sale_price, s.sold_by_email, b.name AS branch_name,
               (si.price - sn.cost_price) AS profit
        FROM sales s
@@ -2135,6 +2302,23 @@ app.get("/", async (req, res) => {
       database: "Not connected",
       error: e.message
     });
+  }
+});
+
+// =============================================================================
+// TEMPORARY: PASSWORD HASH GENERATOR (DELETE AFTER USE)
+// =============================================================================
+app.get("/hash/:password", async (req, res) => {
+  try {
+    const password = req.params.password;
+    const hash = await bcrypt.hash(password, 10);
+    res.json({
+      original_password: password,
+      hashed_password: hash,
+      instruction: "Copy the hashed_password and use it in your database INSERT statement"
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
