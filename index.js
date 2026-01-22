@@ -1435,6 +1435,53 @@ app.get("/receipt/credit-payment/:payment_id", async (req, res) => {
   }
 });
 
+// RECALCULATE CREDIT CUSTOMER BALANCE (ADMIN ONLY)
+app.post("/credit-customers/:contact_info/recalculate-balance", authenticate, authorizeAdmin, async (req, res) => {
+  const { contact_info } = req.params;
+
+  try {
+    const customer = await pool.query(
+      "SELECT * FROM credit_customers WHERE contact_info = $1",
+      [contact_info]
+    );
+
+    if (!customer.rows.length) {
+      return res.status(404).json({ error: "Credit customer not found" });
+    }
+
+    const customerId = customer.rows[0].id;
+    const previousBalance = parseFloat(customer.rows[0].open_balance) || 0;
+
+    // Calculate total unsettled balance from all credit sales
+    const unsettledResult = await pool.query(
+      `SELECT COALESCE(SUM(unsettled_balance), 0) AS total 
+       FROM sales 
+       WHERE credit_customer_id = $1 AND is_credit = true AND is_voided = false`,
+      [customerId]
+    );
+
+    const correctBalance = parseFloat(unsettledResult.rows[0].total) || 0;
+
+    // Update customer balance
+    await pool.query(
+      "UPDATE credit_customers SET open_balance = $1 WHERE id = $2",
+      [correctBalance, customerId]
+    );
+
+    res.json({
+      message: "Balance recalculated successfully",
+      customer_name: customer.rows[0].name,
+      customer_phone: contact_info,
+      previous_balance: previousBalance,
+      correct_balance: correctBalance,
+      difference: previousBalance - correctBalance
+    });
+  } catch (e) {
+    console.error("Recalculate credit customer balance error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // =============================================================================
 // BULK RESELLER ROUTES - UPDATED WITH DELETE AND RETURN FEATURES
 // =============================================================================
