@@ -1652,7 +1652,7 @@ app.post("/bulk-resellers/:reseller_id/add-laptops", authenticate, async (req, r
   }
 });
 
-// RETURN LAPTOP FROM BULK RESELLER (NEW FEATURE)
+// RETURN LAPTOP FROM BULK RESELLER (FIXED VERSION)
 app.post("/bulk-resellers/:reseller_id/return-laptop", authenticate, async (req, res) => {
   const err = validateRequiredFields(["serial_number"], req.body);
   if (err) return res.status(400).json({ error: err });
@@ -1664,7 +1664,7 @@ app.post("/bulk-resellers/:reseller_id/return-laptop", authenticate, async (req,
   try {
     await client.query("BEGIN");
 
-    // Verify reseller exists
+    // Verify reseller exists and get current balance
     const reseller = await client.query(
       "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
       [reseller_id]
@@ -1674,9 +1674,13 @@ app.post("/bulk-resellers/:reseller_id/return-laptop", authenticate, async (req,
       throw new Error("Bulk reseller not found");
     }
 
-    // Find the item in credit book
+    const currentBalance = parseFloat(reseller.rows[0].open_balance) || 0;
+    const currentTotalPurchases = parseFloat(reseller.rows[0].total_purchases) || 0;
+
+    // Find the item in credit book - get price BEFORE deleting
     const itemResult = await client.query(
-      `SELECT bri.*, sn.serial_number, sn.product_name, sn.id AS laptop_id
+      `SELECT bri.id AS item_id, bri.given_price, bri.serial_number_id,
+              sn.serial_number, sn.product_name, sn.id AS laptop_id
        FROM bulk_reseller_items bri
        JOIN serial_numbers sn ON sn.id = bri.serial_number_id
        WHERE bri.reseller_id = $1 AND sn.serial_number = $2`,
@@ -1688,34 +1692,48 @@ app.post("/bulk-resellers/:reseller_id/return-laptop", authenticate, async (req,
     }
 
     const item = itemResult.rows[0];
-    const givenPrice = parseFloat(item.given_price);
+    const givenPrice = parseFloat(item.given_price) || 0;
 
-    // Remove from credit book
-    await client.query("DELETE FROM bulk_reseller_items WHERE id = $1", [item.id]);
+    console.log(`Return laptop: Reseller ${reseller_id}, Serial: ${serial_number}`);
+    console.log(`Current balance: ${currentBalance}, Given price: ${givenPrice}`);
 
-    // Mark laptop as returned (available for sale again)
-    await client.query(
-      "UPDATE serial_numbers SET status = 'returned', sale_price = NULL WHERE id = $1",
-      [item.laptop_id]
-    );
+    // Calculate new balances - clamp at 0
+    const newBalance = Math.max(0, currentBalance - givenPrice);
+    const newTotalPurchases = Math.max(0, currentTotalPurchases - givenPrice);
 
-    // Update reseller balance (reduce what they owe)
-    const newBalance = Math.max(0, parseFloat(reseller.rows[0].open_balance) - givenPrice);
-    const newTotalPurchases = Math.max(0, parseFloat(reseller.rows[0].total_purchases) - givenPrice);
-    
+    console.log(`New balance will be: ${newBalance}`);
+
+    // Step 1: Update reseller balance FIRST (before deleting the item)
     await client.query(
       "UPDATE credit_customers SET open_balance = $1, total_purchases = $2 WHERE id = $3",
       [newBalance, newTotalPurchases, reseller_id]
     );
 
+    // Step 2: Remove from credit book
+    await client.query("DELETE FROM bulk_reseller_items WHERE id = $1", [item.item_id]);
+
+    // Step 3: Mark laptop as returned (available for sale again)
+    await client.query(
+      "UPDATE serial_numbers SET status = 'returned', sale_price = NULL WHERE id = $1",
+      [item.laptop_id]
+    );
+
     await client.query("COMMIT");
+
+    // Verify the update worked
+    const verifyResult = await pool.query(
+      "SELECT open_balance, total_purchases FROM credit_customers WHERE id = $1",
+      [reseller_id]
+    );
 
     res.json({
       message: "Laptop returned successfully",
       serial_number: serial_number,
       product_name: item.product_name,
+      previous_balance: currentBalance,
       amount_reduced: givenPrice,
-      new_balance: newBalance
+      new_balance: parseFloat(verifyResult.rows[0].open_balance),
+      new_total_purchases: parseFloat(verifyResult.rows[0].total_purchases)
     });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -1862,6 +1880,98 @@ app.get("/receipt/bulk-reseller-payment/:payment_id", async (req, res) => {
     res.status(500).json({ error: "Failed to generate receipt" });
   }
 });
+
+// MANUAL BALANCE CORRECTION FOR BULK RESELLER (ADMIN ONLY)
+app.post("/bulk-resellers/:reseller_id/correct-balance", authenticate, authorizeAdmin, async (req, res) => {
+  const err = validateRequiredFields(["new_balance"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { reseller_id } = req.params;
+  const { new_balance, reason } = req.body;
+
+  try {
+    const reseller = await pool.query(
+      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      [reseller_id]
+    );
+
+    if (!reseller.rows.length) {
+      return res.status(404).json({ error: "Bulk reseller not found" });
+    }
+
+    const previousBalance = parseFloat(reseller.rows[0].open_balance);
+    const correctedBalance = Math.max(0, parseFloat(new_balance));
+
+    await pool.query(
+      "UPDATE credit_customers SET open_balance = $1 WHERE id = $2",
+      [correctedBalance, reseller_id]
+    );
+
+    res.json({
+      message: "Balance corrected successfully",
+      reseller_name: reseller.rows[0].name,
+      previous_balance: previousBalance,
+      new_balance: correctedBalance,
+      reason: reason || "Manual correction"
+    });
+  } catch (e) {
+    console.error("Balance correction error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// RECALCULATE BULK RESELLER BALANCE FROM CREDIT BOOK (ADMIN ONLY)
+app.post("/bulk-resellers/:reseller_id/recalculate-balance", authenticate, authorizeAdmin, async (req, res) => {
+  const { reseller_id } = req.params;
+
+  try {
+    const reseller = await pool.query(
+      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      [reseller_id]
+    );
+
+    if (!reseller.rows.length) {
+      return res.status(404).json({ error: "Bulk reseller not found" });
+    }
+
+    // Calculate what the balance SHOULD be based on credit book items
+    const itemsTotal = await pool.query(
+      "SELECT COALESCE(SUM(given_price), 0) AS total FROM bulk_reseller_items WHERE reseller_id = $1",
+      [reseller_id]
+    );
+
+    // Calculate total payments made
+    const paymentsTotal = await pool.query(
+      "SELECT COALESCE(SUM(amount), 0) AS total FROM bulk_reseller_payments WHERE reseller_id = $1",
+      [reseller_id]
+    );
+
+    const itemsSum = parseFloat(itemsTotal.rows[0].total) || 0;
+    const paymentsSum = parseFloat(paymentsTotal.rows[0].total) || 0;
+    const correctBalance = Math.max(0, itemsSum - paymentsSum);
+
+    const previousBalance = parseFloat(reseller.rows[0].open_balance);
+
+    // Update to correct balance
+    await pool.query(
+      "UPDATE credit_customers SET open_balance = $1, total_purchases = $2 WHERE id = $3",
+      [correctBalance, itemsSum, reseller_id]
+    );
+
+    res.json({
+      message: "Balance recalculated successfully",
+      reseller_name: reseller.rows[0].name,
+      previous_balance: previousBalance,
+      items_total: itemsSum,
+      payments_total: paymentsSum,
+      correct_balance: correctBalance
+    });
+  } catch (e) {
+    console.error("Recalculate balance error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // =============================================================================
 // SUPPLIER FAULT REPORT ROUTES
 // =============================================================================
