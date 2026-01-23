@@ -631,8 +631,8 @@ app.delete("/stock/:serial_number", authenticate, authorizeAdmin, async (req, re
   }
 });
 
-// Transfer Stock to Another Branch (Admin Only)
-app.post("/stock/transfer", authenticate, authorizeAdmin, async (req, res) => {
+// Transfer Stock to Another Branch (Admin and Sales)
+app.post("/stock/transfer", authenticate, async (req, res) => {
   const err = validateRequiredFields(["serial_number", "to_branch_name"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -819,11 +819,18 @@ app.post("/sales", authenticate, async (req, res) => {
 
         if (existingCustomer.rows.length) {
           creditCustomerId = existingCustomer.rows[0].id;
+          // Update branch_id if not set
+          if (!existingCustomer.rows[0].branch_id) {
+            await client.query(
+              "UPDATE credit_customers SET branch_id = $1 WHERE id = $2",
+              [branch.id, creditCustomerId]
+            );
+          }
         } else {
           const newCustomer = await client.query(
-            `INSERT INTO credit_customers (name, contact_info, customer_type, open_balance, total_purchases)
-             VALUES ($1, $2, 'regular', 0, 0) RETURNING id`,
-            [customer_name, customer_phone]
+            `INSERT INTO credit_customers (name, contact_info, customer_type, open_balance, total_purchases, branch_id)
+             VALUES ($1, $2, 'regular', 0, 0, $3) RETURNING id`,
+            [customer_name, customer_phone, branch.id]
           );
           creditCustomerId = newCustomer.rows[0].id;
         }
@@ -1244,14 +1251,33 @@ app.post("/credit-return", authenticate, async (req, res) => {
 // CREDIT CUSTOMER ROUTES
 // =============================================================================
 
-// Get All Credit Customers
+// Get All Credit Customers (with branch filter)
 app.get("/credit-customers", authenticate, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT id, name, contact_info, customer_type, open_balance, total_purchases, created_at
-       FROM credit_customers
-       ORDER BY name`
-    );
+    const { branch_name } = req.query;
+    let query = `
+      SELECT cc.id, cc.name, cc.contact_info, cc.customer_type, cc.open_balance, 
+             cc.total_purchases, cc.created_at, cc.branch_id, b.name AS branch_name
+       FROM credit_customers cc
+       LEFT JOIN branches b ON b.id = cc.branch_id
+    `;
+    const params = [];
+
+    // Sales users see only their branch customers
+    if (req.user.role === "sales") {
+      query += ` WHERE (cc.branch_id = $1 OR cc.branch_id IS NULL) AND cc.customer_type != 'bulk_reseller'`;
+      params.push(req.user.branch_id);
+    } else if (branch_name) {
+      const branch = await getBranchByName(branch_name);
+      if (branch) {
+        query += ` WHERE (cc.branch_id = $1 OR cc.branch_id IS NULL)`;
+        params.push(branch.id);
+      }
+    }
+
+    query += ` ORDER BY cc.name`;
+
+    const result = await pool.query(query, params);
     res.json({ customers: result.rows });
   } catch (e) {
     console.error("Get credit customers error:", e.message);
@@ -1431,6 +1457,48 @@ app.get("/receipt/credit-payment/:payment_id", async (req, res) => {
   } catch (e) {
     console.error("Credit payment receipt error:", e.message);
     res.status(500).json({ error: "Failed to generate receipt" });
+  }
+});
+
+// ASSIGN BRANCH TO CREDIT CUSTOMER (ADMIN ONLY)
+app.put("/credit-customers/:contact_info/assign-branch", authenticate, authorizeAdmin, async (req, res) => {
+  const err = validateRequiredFields(["branch_name"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { contact_info } = req.params;
+  const { branch_name } = req.body;
+
+  try {
+    const customer = await pool.query(
+      "SELECT * FROM credit_customers WHERE contact_info = $1",
+      [contact_info]
+    );
+
+    if (!customer.rows.length) {
+      return res.status(404).json({ error: "Credit customer not found" });
+    }
+
+    const branch = await getBranchByName(branch_name);
+    if (!branch) {
+      return res.status(400).json({ error: "Branch not found" });
+    }
+
+    const previousBranchId = customer.rows[0].branch_id;
+
+    await pool.query(
+      "UPDATE credit_customers SET branch_id = $1 WHERE id = $2",
+      [branch.id, customer.rows[0].id]
+    );
+
+    res.json({
+      message: "Branch assigned successfully",
+      customer_name: customer.rows[0].name,
+      branch_name: branch_name,
+      previous_branch_id: previousBranchId
+    });
+  } catch (e) {
+    console.error("Assign branch error:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -1805,7 +1873,7 @@ app.get("/bulk-resellers/:reseller_id/credit-book", authenticate, async (req, re
     }
 
     const items = await pool.query(
-      `SELECT bri.*, sn.product_name, sn.serial_number, sn.specifications
+      `SELECT bri.*, sn.product_name, sn.serial_number, sn.specifications, sn.cost_price
        FROM bulk_reseller_items bri
        JOIN serial_numbers sn ON sn.id = bri.serial_number_id
        WHERE bri.reseller_id = $1
@@ -1813,11 +1881,19 @@ app.get("/bulk-resellers/:reseller_id/credit-book", authenticate, async (req, re
       [reseller_id]
     );
 
+    // Calculate profits from fully paid items only
+    const fullyPaidItems = items.rows.filter(item => item.payment_status === 'fully_paid');
+    const totalProfit = fullyPaidItems.reduce((sum, item) => {
+      return sum + (parseFloat(item.given_price) - parseFloat(item.cost_price || 0));
+    }, 0);
+
     res.json({
       reseller: reseller.rows[0],
       items: items.rows,
       total_items: items.rows.length,
-      total_owed: reseller.rows[0].open_balance
+      total_owed: reseller.rows[0].open_balance,
+      fully_paid_count: fullyPaidItems.length,
+      total_profit_from_paid: totalProfit
     });
   } catch (e) {
     console.error("Get credit book error:", e.message);
@@ -1963,6 +2039,302 @@ app.post("/bulk-resellers/:reseller_id/correct-balance", authenticate, authorize
   } catch (e) {
     console.error("Balance correction error:", e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// UPDATE BULK RESELLER ITEM PAYMENT STATUS
+app.put("/bulk-resellers/:reseller_id/items/:item_id/payment-status", authenticate, async (req, res) => {
+  const err = validateRequiredFields(["payment_status"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { reseller_id, item_id } = req.params;
+  const { payment_status, amount_paid } = req.body;
+
+  const validStatuses = ['unpaid', 'partially_paid', 'fully_paid'];
+  if (!validStatuses.includes(payment_status)) {
+    return res.status(400).json({ error: "Invalid payment status. Must be: unpaid, partially_paid, or fully_paid" });
+  }
+
+  try {
+    // Verify item exists and belongs to reseller
+    const item = await pool.query(
+      `SELECT bri.*, sn.product_name, sn.serial_number 
+       FROM bulk_reseller_items bri
+       JOIN serial_numbers sn ON sn.id = bri.serial_number_id
+       WHERE bri.id = $1 AND bri.reseller_id = $2`,
+      [item_id, reseller_id]
+    );
+
+    if (!item.rows.length) {
+      return res.status(404).json({ error: "Item not found in this reseller's credit book" });
+    }
+
+    const givenPrice = parseFloat(item.rows[0].given_price);
+    let paidAmount = 0;
+
+    if (payment_status === 'fully_paid') {
+      paidAmount = givenPrice;
+    } else if (payment_status === 'partially_paid') {
+      paidAmount = parseFloat(amount_paid) || 0;
+      if (paidAmount <= 0 || paidAmount >= givenPrice) {
+        return res.status(400).json({ error: "Partial payment must be greater than 0 and less than the full price" });
+      }
+    }
+
+    await pool.query(
+      "UPDATE bulk_reseller_items SET payment_status = $1, amount_paid = $2 WHERE id = $3",
+      [payment_status, paidAmount, item_id]
+    );
+
+    res.json({
+      message: "Payment status updated successfully",
+      item_id: item_id,
+      product_name: item.rows[0].product_name,
+      serial_number: item.rows[0].serial_number,
+      given_price: givenPrice,
+      payment_status: payment_status,
+      amount_paid: paidAmount
+    });
+  } catch (e) {
+    console.error("Update payment status error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// MANUAL BALANCE EDIT FOR BULK RESELLER (ADMIN ONLY)
+app.put("/bulk-resellers/:reseller_id/manual-balance", authenticate, authorizeAdmin, async (req, res) => {
+  const err = validateRequiredFields(["new_balance"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { reseller_id } = req.params;
+  const { new_balance, reason } = req.body;
+
+  try {
+    const reseller = await pool.query(
+      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      [reseller_id]
+    );
+
+    if (!reseller.rows.length) {
+      return res.status(404).json({ error: "Bulk reseller not found" });
+    }
+
+    const previousBalance = parseFloat(reseller.rows[0].open_balance);
+    const newBalanceAmount = Math.max(0, parseFloat(new_balance));
+
+    await pool.query(
+      "UPDATE credit_customers SET open_balance = $1 WHERE id = $2",
+      [newBalanceAmount, reseller_id]
+    );
+
+    res.json({
+      message: "Balance updated successfully",
+      reseller_name: reseller.rows[0].name,
+      previous_balance: previousBalance,
+      new_balance: newBalanceAmount,
+      reason: reason || "Manual adjustment"
+    });
+  } catch (e) {
+    console.error("Manual balance edit error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// MANUAL BALANCE EDIT FOR CREDIT CUSTOMER (ADMIN ONLY)
+app.put("/credit-customers/:contact_info/manual-balance", authenticate, authorizeAdmin, async (req, res) => {
+  const err = validateRequiredFields(["new_balance"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { contact_info } = req.params;
+  const { new_balance, reason } = req.body;
+
+  try {
+    const customer = await pool.query(
+      "SELECT * FROM credit_customers WHERE contact_info = $1",
+      [contact_info]
+    );
+
+    if (!customer.rows.length) {
+      return res.status(404).json({ error: "Credit customer not found" });
+    }
+
+    const previousBalance = parseFloat(customer.rows[0].open_balance);
+    const newBalanceAmount = Math.max(0, parseFloat(new_balance));
+
+    await pool.query(
+      "UPDATE credit_customers SET open_balance = $1 WHERE id = $2",
+      [newBalanceAmount, customer.rows[0].id]
+    );
+
+    res.json({
+      message: "Balance updated successfully",
+      customer_name: customer.rows[0].name,
+      previous_balance: previousBalance,
+      new_balance: newBalanceAmount,
+      reason: reason || "Manual adjustment"
+    });
+  } catch (e) {
+    console.error("Manual balance edit error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET BULK RESELLER PAYMENT HISTORY
+app.get("/bulk-resellers/:reseller_id/payments", authenticate, async (req, res) => {
+  const { reseller_id } = req.params;
+
+  try {
+    const payments = await pool.query(
+      `SELECT brp.*, cc.name AS reseller_name
+       FROM bulk_reseller_payments brp
+       JOIN credit_customers cc ON cc.id = brp.reseller_id
+       WHERE brp.reseller_id = $1
+       ORDER BY brp.created_at DESC`,
+      [reseller_id]
+    );
+
+    res.json({ payments: payments.rows });
+  } catch (e) {
+    console.error("Get bulk reseller payments error:", e.message);
+    res.status(500).json({ error: "Failed to load payments" });
+  }
+});
+
+// DELETE BULK RESELLER PAYMENT (ADMIN ONLY)
+app.delete("/bulk-resellers/:reseller_id/payments/:payment_id", authenticate, authorizeAdmin, async (req, res) => {
+  const { reseller_id, payment_id } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Get the payment
+    const payment = await client.query(
+      "SELECT * FROM bulk_reseller_payments WHERE id = $1 AND reseller_id = $2",
+      [payment_id, reseller_id]
+    );
+
+    if (!payment.rows.length) {
+      throw new Error("Payment not found");
+    }
+
+    const paymentAmount = parseFloat(payment.rows[0].amount);
+
+    // Delete the payment
+    await client.query("DELETE FROM bulk_reseller_payments WHERE id = $1", [payment_id]);
+
+    // Add the amount back to the reseller's balance
+    await client.query(
+      "UPDATE credit_customers SET open_balance = open_balance + $1 WHERE id = $2",
+      [paymentAmount, reseller_id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Payment deleted successfully",
+      payment_id: payment_id,
+      amount_restored: paymentAmount
+    });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Delete bulk reseller payment error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// GET CREDIT CUSTOMER PAYMENT HISTORY
+app.get("/credit-customers/:contact_info/payments", authenticate, async (req, res) => {
+  const { contact_info } = req.params;
+
+  try {
+    const customer = await pool.query(
+      "SELECT * FROM credit_customers WHERE contact_info = $1",
+      [contact_info]
+    );
+
+    if (!customer.rows.length) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+
+    const payments = await pool.query(
+      `SELECT cp.*, s.id AS sale_id
+       FROM credit_payments cp
+       JOIN sales s ON s.id = cp.sale_id
+       WHERE cp.credit_customer_id = $1
+       ORDER BY cp.created_at DESC`,
+      [customer.rows[0].id]
+    );
+
+    res.json({ payments: payments.rows });
+  } catch (e) {
+    console.error("Get credit customer payments error:", e.message);
+    res.status(500).json({ error: "Failed to load payments" });
+  }
+});
+
+// DELETE CREDIT CUSTOMER PAYMENT (ADMIN ONLY)
+app.delete("/credit-customers/:contact_info/payments/:payment_id", authenticate, authorizeAdmin, async (req, res) => {
+  const { contact_info, payment_id } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const customer = await client.query(
+      "SELECT * FROM credit_customers WHERE contact_info = $1",
+      [contact_info]
+    );
+
+    if (!customer.rows.length) {
+      throw new Error("Customer not found");
+    }
+
+    const customerId = customer.rows[0].id;
+
+    // Get the payment
+    const payment = await client.query(
+      "SELECT * FROM credit_payments WHERE id = $1 AND credit_customer_id = $2",
+      [payment_id, customerId]
+    );
+
+    if (!payment.rows.length) {
+      throw new Error("Payment not found");
+    }
+
+    const paymentAmount = parseFloat(payment.rows[0].amount);
+    const saleId = payment.rows[0].sale_id;
+
+    // Delete the payment
+    await client.query("DELETE FROM credit_payments WHERE id = $1", [payment_id]);
+
+    // Add the amount back to the customer's balance
+    await client.query(
+      "UPDATE credit_customers SET open_balance = open_balance + $1 WHERE id = $2",
+      [paymentAmount, customerId]
+    );
+
+    // Add the amount back to the sale's unsettled balance
+    await client.query(
+      "UPDATE sales SET unsettled_balance = unsettled_balance + $1 WHERE id = $2",
+      [paymentAmount, saleId]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Payment deleted successfully",
+      payment_id: payment_id,
+      amount_restored: paymentAmount
+    });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Delete credit customer payment error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 
