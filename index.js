@@ -1589,15 +1589,35 @@ app.post("/bulk-resellers", authenticate, authorizeAdmin, async (req, res) => {
   }
 });
 
-// Get All Bulk Resellers
+// Get All Bulk Resellers (with branch filter)
 app.get("/bulk-resellers", authenticate, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT id, name, contact_info, open_balance, total_purchases, created_at
-       FROM credit_customers
-       WHERE customer_type = 'bulk_reseller'
-       ORDER BY name`
-    );
+    const { branch_name } = req.query;
+    
+    let query = `
+      SELECT cc.id, cc.name, cc.contact_info, cc.open_balance, cc.total_purchases, 
+             cc.created_at, cc.branch_id, b.name AS branch_name
+      FROM credit_customers cc
+      LEFT JOIN branches b ON b.id = cc.branch_id
+      WHERE cc.customer_type = 'bulk_reseller'
+    `;
+    const params = [];
+
+    // Sales users see only their branch resellers
+    if (req.user.role === "sales") {
+      query += ` AND (cc.branch_id = $1 OR cc.branch_id IS NULL)`;
+      params.push(req.user.branch_id);
+    } else if (branch_name) {
+      const branch = await getBranchByName(branch_name);
+      if (branch) {
+        query += ` AND (cc.branch_id = $1 OR cc.branch_id IS NULL)`;
+        params.push(branch.id);
+      }
+    }
+
+    query += ` ORDER BY cc.name`;
+
+    const result = await pool.query(query, params);
     res.json({ resellers: result.rows });
   } catch (e) {
     console.error("Get bulk resellers error:", e.message);
@@ -1864,10 +1884,12 @@ app.get("/bulk-resellers/:reseller_id/credit-book", authenticate, async (req, re
     const { reseller_id } = req.params;
 
     const reseller = await pool.query(
-      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      `SELECT cc.*, b.name AS branch_name
+       FROM credit_customers cc
+       LEFT JOIN branches b ON b.id = cc.branch_id
+       WHERE cc.id = $1 AND cc.customer_type = 'bulk_reseller'`,
       [reseller_id]
     );
-
     if (!reseller.rows.length) {
       return res.status(404).json({ error: "Bulk reseller not found" });
     }
@@ -2097,6 +2119,48 @@ app.put("/bulk-resellers/:reseller_id/items/:item_id/payment-status", authentica
     });
   } catch (e) {
     console.error("Update payment status error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ASSIGN BRANCH TO BULK RESELLER (ADMIN ONLY)
+app.put("/bulk-resellers/:reseller_id/assign-branch", authenticate, authorizeAdmin, async (req, res) => {
+  const err = validateRequiredFields(["branch_name"], req.body);
+  if (err) return res.status(400).json({ error: err });
+
+  const { reseller_id } = req.params;
+  const { branch_name } = req.body;
+
+  try {
+    const reseller = await pool.query(
+      "SELECT * FROM credit_customers WHERE id = $1 AND customer_type = 'bulk_reseller'",
+      [reseller_id]
+    );
+
+    if (!reseller.rows.length) {
+      return res.status(404).json({ error: "Bulk reseller not found" });
+    }
+
+    const branch = await getBranchByName(branch_name);
+    if (!branch) {
+      return res.status(400).json({ error: "Branch not found" });
+    }
+
+    const previousBranchId = reseller.rows[0].branch_id;
+
+    await pool.query(
+      "UPDATE credit_customers SET branch_id = $1 WHERE id = $2",
+      [branch.id, reseller.rows[0].id]
+    );
+
+    res.json({
+      message: "Branch assigned successfully",
+      reseller_name: reseller.rows[0].name,
+      branch_name: branch_name,
+      previous_branch_id: previousBranchId
+    });
+  } catch (e) {
+    console.error("Assign branch to reseller error:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
