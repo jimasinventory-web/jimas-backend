@@ -2385,6 +2385,117 @@ app.get("/reports/custom", authenticate, async (req, res) => {
 });
 
 // =============================================================================
+// CREDIT PAYMENTS REPORT ROUTE
+// =============================================================================
+
+// Get All Credit Payments (Credit Customers + Bulk Resellers)
+app.get("/reports/credit-payments", authenticate, async (req, res) => {
+  try {
+    const { start_date, end_date, branch_name } = req.query;
+    
+    let branchFilter = "";
+    const params = [];
+    let paramIndex = 1;
+
+    if (start_date && end_date) {
+      params.push(start_date, end_date);
+      paramIndex = 3;
+    }
+
+    if (req.user.role === "sales") {
+      branchFilter = start_date ? `AND s.branch_id = $${paramIndex}` : `WHERE s.branch_id = $1`;
+      params.push(req.user.branch_id);
+    } else if (branch_name) {
+      const branch = await getBranchByName(branch_name);
+      if (branch) {
+        branchFilter = start_date ? `AND s.branch_id = $${paramIndex}` : `WHERE s.branch_id = $1`;
+        params.push(branch.id);
+      }
+    }
+
+    // Credit Customer Payments
+    let creditCustomerQuery = `
+      SELECT 
+        cp.id AS payment_id,
+        cp.amount,
+        cp.created_at AS payment_date,
+        cp.sale_id,
+        cc.name AS customer_name,
+        cc.contact_info AS customer_phone,
+        'credit_customer' AS payment_type,
+        cc.customer_type,
+        b.name AS branch_name
+      FROM credit_payments cp
+      JOIN credit_customers cc ON cc.id = cp.credit_customer_id
+      JOIN sales s ON s.id = cp.sale_id
+      JOIN branches b ON b.id = s.branch_id
+    `;
+
+    if (start_date && end_date) {
+      creditCustomerQuery += ` WHERE DATE(cp.created_at) >= $1 AND DATE(cp.created_at) <= $2 ${branchFilter}`;
+    } else if (branchFilter) {
+      creditCustomerQuery += ` ${branchFilter}`;
+    }
+
+    creditCustomerQuery += ` ORDER BY cp.created_at DESC`;
+
+    const creditPayments = await pool.query(creditCustomerQuery, params);
+
+    // Bulk Reseller Payments
+    let bulkResellerQuery = `
+      SELECT 
+        brp.id AS payment_id,
+        brp.amount,
+        brp.created_at AS payment_date,
+        NULL AS sale_id,
+        cc.name AS customer_name,
+        cc.contact_info AS customer_phone,
+        'bulk_reseller' AS payment_type,
+        cc.customer_type,
+        'N/A' AS branch_name
+      FROM bulk_reseller_payments brp
+      JOIN credit_customers cc ON cc.id = brp.reseller_id
+    `;
+
+    const bulkParams = [];
+    if (start_date && end_date) {
+      bulkResellerQuery += ` WHERE DATE(brp.created_at) >= $1 AND DATE(brp.created_at) <= $2`;
+      bulkParams.push(start_date, end_date);
+    }
+
+    bulkResellerQuery += ` ORDER BY brp.created_at DESC`;
+
+    const bulkPayments = await pool.query(bulkResellerQuery, bulkParams);
+
+    // Combine and sort all payments
+    const allPayments = [...creditPayments.rows, ...bulkPayments.rows].sort(
+      (a, b) => new Date(b.payment_date) - new Date(a.payment_date)
+    );
+
+    // Calculate totals
+    const totals = {
+      total_payments: allPayments.length,
+      total_amount: allPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0),
+      credit_customer_payments: creditPayments.rows.length,
+      credit_customer_amount: creditPayments.rows.reduce((sum, p) => sum + parseFloat(p.amount), 0),
+      bulk_reseller_payments: bulkPayments.rows.length,
+      bulk_reseller_amount: bulkPayments.rows.reduce((sum, p) => sum + parseFloat(p.amount), 0)
+    };
+
+    res.json({
+      report_type: "CREDIT_PAYMENTS",
+      start_date: start_date || "All time",
+      end_date: end_date || "All time",
+      payments: allPayments,
+      totals
+    });
+  } catch (e) {
+    console.error("Credit payments report error:", e.message);
+    res.status(500).json({ error: "Failed to generate credit payments report" });
+  }
+});
+
+// =============================================================================
 // SEARCH ROUTE
 // =============================================================================
 
