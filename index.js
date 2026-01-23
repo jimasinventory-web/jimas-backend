@@ -1066,7 +1066,6 @@ app.get("/receipt/sale/:sale_id", async (req, res) => {
       vat_percentage: saleData.vat_percentage,
       vat_amount: saleData.vat_amount,
       total_amount: saleData.total_amount,
-      sales_note: saleData.sales_note
     };
 
     generateCashSaleReceipt(receiptData, res);
