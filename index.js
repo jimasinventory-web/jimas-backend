@@ -2930,6 +2930,64 @@ app.get("/reports/credit-payments", authenticate, async (req, res) => {
   }
 });
 
+// FIND GHOST SALES (ADMIN ONLY)
+app.get("/admin/ghost-sales", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT sn.id, sn.serial_number, sn.product_name, sn.status, sn.sale_price, 
+              sn.branch_id, b.name AS branch_name, sn.created_at
+       FROM serial_numbers sn
+       LEFT JOIN branches b ON b.id = sn.branch_id
+       WHERE sn.status = 'sold'
+       AND sn.id NOT IN (
+         SELECT si.serial_number_id FROM sale_items si WHERE si.serial_number_id IS NOT NULL
+       )
+       AND sn.id NOT IN (
+         SELECT bri.serial_number_id FROM bulk_reseller_items bri
+       )
+       ORDER BY sn.created_at DESC`
+    );
+
+    res.json({ 
+      ghost_sales: result.rows,
+      count: result.rows.length,
+      message: result.rows.length > 0 
+        ? `Found ${result.rows.length} laptops marked as sold with no sale record` 
+        : "No ghost sales found - all good!"
+    });
+  } catch (e) {
+    console.error("Ghost sales check error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// FIX GHOST SALES (ADMIN ONLY)
+app.post("/admin/fix-ghost-sales", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE serial_numbers 
+       SET status = 'available', sale_price = NULL
+       WHERE status = 'sold'
+       AND id NOT IN (
+         SELECT si.serial_number_id FROM sale_items si WHERE si.serial_number_id IS NOT NULL
+       )
+       AND id NOT IN (
+         SELECT bri.serial_number_id FROM bulk_reseller_items bri
+       )
+       RETURNING serial_number, product_name`
+    );
+
+    res.json({ 
+      fixed: result.rows,
+      count: result.rows.length,
+      message: `${result.rows.length} ghost sales fixed and set back to available`
+    });
+  } catch (e) {
+    console.error("Fix ghost sales error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // =============================================================================
 // SEARCH ROUTE
 // =============================================================================
