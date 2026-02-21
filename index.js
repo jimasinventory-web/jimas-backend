@@ -498,8 +498,8 @@ app.get("/suppliers", authenticate, async (req, res) => {
 // STOCK ROUTES - UPDATED: ADD/DELETE NOW ADMIN ONLY
 // =============================================================================
 
-// Add Single Stock Item (ADMIN ONLY - UPDATED)
-app.post("/stock", authenticate, authorizeAdmin, async (req, res) => {
+// Add Single Stock Item (Admin and Sales)
+app.post("/stock", authenticate, async (req, res) => {
   const err = validateRequiredFields(["product_name", "serial_number", "branch_name", "supplier_name", "cost_price"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -511,6 +511,11 @@ app.post("/stock", authenticate, authorizeAdmin, async (req, res) => {
 
     const supplier = await getSupplierByName(supplier_name);
     if (!supplier) return res.status(400).json({ error: "Supplier not found" });
+
+    // Sales users can only add to their branch
+    if (req.user.role === "sales" && req.user.branch_id !== branch.id) {
+      return res.status(403).json({ error: "You can only add stock to your assigned branch" });
+    }
 
     // Check if serial already exists
     const serialCheck = await pool.query("SELECT id FROM serial_numbers WHERE serial_number = $1", [serial_number]);
@@ -531,8 +536,8 @@ app.post("/stock", authenticate, authorizeAdmin, async (req, res) => {
   }
 });
 
-// Add Stock in Bulk (ADMIN ONLY - UPDATED)
-app.post("/stock/bulk", authenticate, authorizeAdmin, async (req, res) => {
+// Add Stock in Bulk (Admin and Sales)
+app.post("/stock/bulk", authenticate, async (req, res) => {
   const err = validateRequiredFields(["product_name", "branch_name", "supplier_name", "cost_price", "serial_numbers"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -549,6 +554,11 @@ app.post("/stock/bulk", authenticate, authorizeAdmin, async (req, res) => {
 
     const supplier = await getSupplierByName(supplier_name);
     if (!supplier) return res.status(400).json({ error: "Supplier not found" });
+
+    // Sales users can only add to their branch
+    if (req.user.role === "sales" && req.user.branch_id !== branch.id) {
+      return res.status(403).json({ error: "You can only add stock to your assigned branch" });
+    }
 
     const client = await pool.connect();
     try {
