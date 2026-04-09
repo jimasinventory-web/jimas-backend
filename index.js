@@ -693,11 +693,12 @@ app.post("/stock/transfer", authenticate, async (req, res) => {
   }
 });
 
-// Lookup Serial Number
+// Lookup Serial Number - ENHANCED WITH SALE HISTORY
 app.get("/lookup-serial/:serial_number", authenticate, async (req, res) => {
   try {
     const { serial_number } = req.params;
 
+    // Get laptop details
     const result = await pool.query(
       `SELECT sn.*, b.name AS branch_name, s.name AS supplier_name
        FROM serial_numbers sn
@@ -711,7 +712,41 @@ app.get("/lookup-serial/:serial_number", authenticate, async (req, res) => {
       return res.status(404).json({ error: "Serial number not found" });
     }
 
-    res.json({ laptop: result.rows[0] });
+    const laptop = result.rows[0];
+
+    // Get sale history if laptop was sold
+    let saleHistory = null;
+    if (laptop.status === 'sold') {
+      const saleResult = await pool.query(
+        `SELECT 
+          s.id AS sale_id,
+          s.created_at AS sale_date,
+          s.payment_type,
+          s.customer_name,
+          s.customer_phone,
+          s.total_amount,
+          s.sold_by_email,
+          si.price AS sale_price,
+          b.name AS branch_name
+         FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id
+         JOIN branches b ON b.id = s.branch_id
+         WHERE si.serial_number_id = $1
+         ORDER BY s.created_at DESC
+         LIMIT 1`,
+        [laptop.id]
+      );
+
+      if (saleResult.rows.length) {
+        saleHistory = saleResult.rows[0];
+      }
+    }
+
+    res.json({ 
+      laptop: laptop,
+      sale_history: saleHistory,
+      is_ghost_sale: laptop.status === 'sold' && !saleHistory
+    });
   } catch (e) {
     console.error("Lookup serial error:", e.message);
     res.status(500).json({ error: "Failed to lookup serial number" });
@@ -2250,6 +2285,68 @@ app.put("/credit-customers/:contact_info/manual-balance", authenticate, authoriz
   } catch (e) {
     console.error("Manual balance edit error:", e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE CREDIT CUSTOMER (ADMIN ONLY - ZERO BALANCE ONLY)
+app.delete("/credit-customers/:contact_info", authenticate, authorizeAdmin, async (req, res) => {
+  const { contact_info } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Get customer details
+    const customer = await client.query(
+      "SELECT * FROM credit_customers WHERE contact_info = $1",
+      [contact_info]
+    );
+
+    if (!customer.rows.length) {
+      throw new Error("Credit customer not found");
+    }
+
+    const customerData = customer.rows[0];
+
+    // Check if customer is a bulk reseller
+    if (customerData.customer_type === 'bulk_reseller') {
+      throw new Error("Cannot delete bulk resellers using this endpoint. Use the bulk reseller delete endpoint instead.");
+    }
+
+    // Check if balance is zero
+    if (parseFloat(customerData.open_balance) !== 0) {
+      throw new Error(`Cannot delete customer with outstanding balance of ₦${parseFloat(customerData.open_balance).toLocaleString()}. Balance must be ₦0.`);
+    }
+
+    // Check if customer has any unsettled sales
+    const unsettledSales = await client.query(
+      `SELECT COUNT(*) AS count FROM sales 
+       WHERE credit_customer_id = $1 AND unsettled_balance > 0 AND is_voided = false`,
+      [customerData.id]
+    );
+
+    if (parseInt(unsettledSales.rows[0].count) > 0) {
+      throw new Error("Cannot delete customer with unsettled sales. All sales must be fully paid or voided.");
+    }
+
+    // Delete payment history
+    await client.query("DELETE FROM credit_payments WHERE credit_customer_id = $1", [customerData.id]);
+
+    // Delete the customer
+    await client.query("DELETE FROM credit_customers WHERE id = $1", [customerData.id]);
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Credit customer deleted successfully",
+      customer_name: customerData.name
+    });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Delete credit customer error:", e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 
