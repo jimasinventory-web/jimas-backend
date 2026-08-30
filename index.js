@@ -1026,20 +1026,40 @@ app.post("/sales", authenticate, async (req, res) => {
 
         const { serial_number, price, ram_price, storage_price } = item;
 
+        const rawSerial = String(serial_number).trim();
+
         const laptopResult = await client.query(
-          "SELECT * FROM serial_numbers WHERE serial_number = $1 AND branch_id = $2",
-          [serial_number, branch.id]
+          "SELECT * FROM serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER($1) AND branch_id = $2",
+          [rawSerial, branch.id]
         );
 
         if (!laptopResult.rows.length) {
-          throw new Error(`Serial ${serial_number} not found in this branch`);
+          // Not in the selected branch — look it up anywhere to explain why.
+          const anywhere = await client.query(
+            `SELECT sn.status, b.name AS branch_name
+             FROM serial_numbers sn
+             JOIN branches b ON b.id = sn.branch_id
+             WHERE UPPER(TRIM(sn.serial_number)) = UPPER($1)
+             LIMIT 1`,
+            [rawSerial]
+          );
+
+          if (anywhere.rows.length) {
+            const found = anywhere.rows[0];
+            throw new Error(
+              `Serial ${rawSerial} is in branch "${found.branch_name}" (status: ${found.status}), not in "${branch_name}". ` +
+              `Select "${found.branch_name}" as the sale branch, or transfer the laptop to "${branch_name}" first.`
+            );
+          }
+
+          throw new Error(`Serial ${rawSerial} does not exist in inventory.`);
         }
 
         const laptop = laptopResult.rows[0];
 
-        // UPDATED: Allow both 'available' and 'returned' status laptops to be sold
+        // Allow both 'available' and 'returned' status laptops to be sold.
         if (!["available", "returned"].includes(laptop.status)) {
-          throw new Error(`Serial ${serial_number} is ${laptop.status} and cannot be sold`);
+          throw new Error(`Serial ${rawSerial} is ${laptop.status} and cannot be sold.`);
         }
 
         const laptopPrice = parseFloat(price) || 0;
