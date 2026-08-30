@@ -1904,17 +1904,38 @@ app.post("/bulk-resellers/:reseller_id/add-laptops", authenticate, async (req, r
         throw new Error("Each item must have serial_number and given_price");
       }
 
+      const rawSerial = String(serial_number).trim();
+
+      // Case-insensitive, whitespace-tolerant lookup within the selected branch.
       const laptop = await client.query(
-        "SELECT * FROM serial_numbers WHERE serial_number = $1 AND branch_id = $2",
-        [serial_number, branch.id]
+        "SELECT * FROM serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER($1) AND branch_id = $2",
+        [rawSerial, branch.id]
       );
 
       if (!laptop.rows.length) {
-        throw new Error(`Serial ${serial_number} not found in branch`);
+        // Not in the chosen branch — look it up anywhere to explain why.
+        const anywhere = await client.query(
+          `SELECT sn.status, b.name AS branch_name
+           FROM serial_numbers sn
+           JOIN branches b ON b.id = sn.branch_id
+           WHERE UPPER(TRIM(sn.serial_number)) = UPPER($1)
+           LIMIT 1`,
+          [rawSerial]
+        );
+
+        if (anywhere.rows.length) {
+          const found = anywhere.rows[0];
+          throw new Error(
+            `Serial ${rawSerial} is in branch "${found.branch_name}" (status: ${found.status}), not in "${branch_name}". ` +
+            `Select "${found.branch_name}" as the branch, or transfer the laptop to "${branch_name}" first.`
+          );
+        }
+
+        throw new Error(`Serial ${rawSerial} does not exist in inventory.`);
       }
 
       if (!["available", "returned"].includes(laptop.rows[0].status)) {
-        throw new Error(`Serial ${serial_number} is not available`);
+        throw new Error(`Serial ${rawSerial} is not available (current status: ${laptop.rows[0].status}).`);
       }
 
       const price = parseFloat(given_price);
