@@ -17,24 +17,118 @@ const PDFDocument = require("pdfkit");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render (and most hosts) sit behind a proxy. This makes req.ip / rate limiting correct.
+app.set("trust proxy", 1);
+
+// -----------------------------
+// CONFIG (all secrets come from environment variables)
+// -----------------------------
+const DATABASE_URL = process.env.DATABASE_URL;
+const JWT_SECRET = process.env.JWT_SECRET || "jimas-super-secret-key-2024";
+
+// Fail fast with a clear message if the database isn't configured.
+if (!DATABASE_URL) {
+  console.error(
+    "\n❌ DATABASE_URL is not set.\n" +
+    "   Add it as an environment variable (see .env.example).\n" +
+    "   On Render: Dashboard → your service → Environment → Add DATABASE_URL.\n"
+  );
+  process.exit(1);
+}
+
+if (JWT_SECRET === "jimas-super-secret-key-2024") {
+  console.warn("⚠️  Using the default JWT_SECRET. Set a strong JWT_SECRET env variable in production.");
+}
+
 // -----------------------------
 // MIDDLEWARE
 // -----------------------------
-app.use(bodyParser.json());
-app.use(cors());
+// Limit request body size to protect against abuse.
+app.use(bodyParser.json({ limit: "1mb" }));
+
+// CORS: allow specific origins in production via ALLOWED_ORIGINS (comma-separated).
+// If not set, falls back to allowing all origins (handy while testing).
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow non-browser tools (no origin) and, if no allowlist is configured, allow all.
+      if (!origin || allowedOrigins.length === 0) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
+  })
+);
+
+// Lightweight security headers (no extra dependency needed).
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-XSS-Protection", "0");
+  next();
+});
+
+// Simple request logger.
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`);
+  });
+  next();
+});
 
 // -----------------------------
 // DATABASE CONNECTION
 // -----------------------------
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://jimas_db_ldts_user:mngwWQoTAZtzVqQax0jJHtfSUscUSGkm@dpg-d5fc1qn5r7bs73ansc5g-a.frankfurt-postgres.render.com/jimas_db_ldts",
-  ssl: { rejectUnauthorized: false }
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
+
+// Don't let an idle-client error crash the whole server.
+pool.on("error", (err) => {
+  console.error("Unexpected PostgreSQL pool error:", err.message);
 });
 
 // -----------------------------
-// JWT SECRET
+// SIMPLE IN-MEMORY LOGIN RATE LIMITER
+// (blocks brute-force login attempts; no external dependency)
 // -----------------------------
-const JWT_SECRET = process.env.JWT_SECRET || "jimas-super-secret-key-2024";
+const loginAttempts = new Map(); // key: ip -> { count, firstAt }
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const LOGIN_MAX_ATTEMPTS = 10;
+
+function loginRateLimiter(req, res, next) {
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+
+  if (!record || now - record.firstAt > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, firstAt: now });
+    return next();
+  }
+
+  record.count += 1;
+  if (record.count > LOGIN_MAX_ATTEMPTS) {
+    return res.status(429).json({
+      error: "Too many login attempts. Please wait a few minutes and try again.",
+    });
+  }
+  next();
+}
+
+// Reset an IP's counter after a successful login.
+function clearLoginAttempts(req) {
+  if (req.ip) loginAttempts.delete(req.ip);
+}
 
 // -----------------------------
 // VALIDATION HELPER
@@ -357,7 +451,7 @@ app.post("/register", authenticate, authorizeAdmin, async (req, res) => {
 });
 
 // Login
-app.post("/login", async (req, res) => {
+app.post("/login", loginRateLimiter, async (req, res) => {
   const err = validateRequiredFields(["email", "password"], req.body);
   if (err) return res.status(400).json({ error: err });
 
@@ -367,6 +461,8 @@ app.post("/login", async (req, res) => {
 
     const valid = await bcrypt.compare(req.body.password, user.password);
     if (!valid) return res.status(400).json({ error: "Invalid password" });
+
+    clearLoginAttempts(req);
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, branch_id: user.branch_id, name: user.name },
@@ -820,6 +916,44 @@ app.get("/stock/groups/:product_name", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to load stock items" });
   }
 });
+
+// Low Stock Alert - products at or below a threshold (default 3)
+// Sales users see only their branch; admins see everything.
+app.get("/stock/low", authenticate, async (req, res) => {
+  try {
+    const threshold = Math.max(0, parseInt(req.query.threshold, 10) || 3);
+
+    if (req.user.role === "sales") {
+      const result = await pool.query(
+        `SELECT product_name, COUNT(*) AS total_available
+         FROM serial_numbers
+         WHERE status IN ('available', 'returned') AND branch_id = $1
+         GROUP BY product_name
+         HAVING COUNT(*) <= $2
+         ORDER BY total_available ASC, product_name`,
+        [req.user.branch_id, threshold]
+      );
+      return res.json({ threshold, groups: result.rows });
+    }
+
+    const result = await pool.query(
+      `SELECT sn.product_name, b.name AS branch_name, b.id AS branch_id, COUNT(*) AS total_available
+       FROM serial_numbers sn
+       JOIN branches b ON b.id = sn.branch_id
+       WHERE sn.status IN ('available', 'returned')
+       GROUP BY sn.product_name, b.name, b.id
+       HAVING COUNT(*) <= $1
+       ORDER BY total_available ASC, sn.product_name, b.name`,
+      [threshold]
+    );
+
+    res.json({ threshold, groups: result.rows });
+  } catch (e) {
+    console.error("Get low stock error:", e.message);
+    res.status(500).json({ error: "Failed to load low stock" });
+  }
+});
+
 // =============================================================================
 // SALES ROUTES - UPDATED WITH SALES_NOTE
 // =============================================================================
@@ -3154,7 +3288,7 @@ app.get("/search", authenticate, async (req, res) => {
 // ROOT ROUTE (Health Check)
 // =============================================================================
 
-app.get("/", async (req, res) => {
+async function healthCheck(req, res) {
   try {
     const result = await pool.query("SELECT NOW()");
     res.json({
@@ -3164,30 +3298,35 @@ app.get("/", async (req, res) => {
       server_time: result.rows[0].now
     });
   } catch (e) {
-    res.json({
-      status: "OK",
+    res.status(503).json({
+      status: "DEGRADED",
       message: "JIMAS Computers API is running",
       database: "Not connected",
       error: e.message
     });
   }
-});
+}
+
+app.get("/", healthCheck);
+app.get("/health", healthCheck);
+
+// NOTE: The old public "/hash/:password" endpoint was removed for security.
+// To create the first admin password hash, run locally:  node hash-password.js
 
 // =============================================================================
-// TEMPORARY: PASSWORD HASH GENERATOR (DELETE AFTER USE)
+// 404 + GLOBAL ERROR HANDLERS (keep these last, after all routes)
 // =============================================================================
-app.get("/hash/:password", async (req, res) => {
-  try {
-    const password = req.params.password;
-    const hash = await bcrypt.hash(password, 10);
-    res.json({
-      original_password: password,
-      hashed_password: hash,
-      instruction: "Copy the hashed_password and use it in your database INSERT statement"
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+app.use((req, res) => {
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err.message);
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({ error: "This origin is not allowed to access the API." });
   }
+  res.status(500).json({ error: "Internal server error" });
 });
 
 // =============================================================================

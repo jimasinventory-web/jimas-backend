@@ -1,0 +1,18 @@
+# Optional: Render Blueprint. If you deploy via "New + -> Blueprint" and point it
+# at this repo, Render will read this file. If your service already exists, you
+# can ignore this file and just set the environment variables in the dashboard.
+services:
+  - type: web
+    name: jimas-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # set manually in the dashboard (secret)
+      - key: JWT_SECRET
+        sync: false          # set manually in the dashboard (secret)
+      - key: ALLOWED_ORIGINS
+        sync: false
